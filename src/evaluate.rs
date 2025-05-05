@@ -1429,7 +1429,7 @@ impl<T: std::fmt::Display> ExpressionEvaluator<T> {
         res += &format!("\nextern \"C\" {{\n\tvoid {0}_complex(std::complex<double> *params, std::complex<double> *buffer,  std::complex<double> *out) {{\n\t\t{0}(params, buffer, out);\n\t\treturn;\n\t}}\n}}\n", function_name);
 
         res += &format!("\nextern \"C\" {{\n\tvoid vec_{0}_double(double *params, double *buffer, double *out, int n) {{\n\t\tfor (int j = 0; j < n ; j++) {{ {0}_double(params + {1}*j, buffer, out + j); }}\n\t}}\n}}\n", function_name, self.param_count);
-        res += &format!("\nextern \"C\" {{\n\tvoid vec_{0}_complex(std::complex<double> *params, std::complex<double> *buffer,  std::complex<double> *out, int n) {{\n\t\tfor (int j = 0; j < n ; j++) {{ {0}_double(params + {1}*j, buffer, out + j); }}\n\t}}\n}}\n", function_name, self.param_count);
+        res += &format!("\nextern \"C\" {{\n\tvoid vec_{0}_complex(std::complex<double> *params, std::complex<double> *buffer,  std::complex<double> *out, int n) {{\n\t\tfor (int j = 0; j < n ; j++) {{ {0}_complex(params + {1}*j, buffer, out + j); }}\n\t}}\n}}\n", function_name, self.param_count);
 
         res
     }
