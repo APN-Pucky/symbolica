@@ -1444,7 +1444,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         }
 
         for i in self.param_count..self.reserved_indices {
-            res += &format!("\tZ{} = {};\n", i, self.stack[i]);
+            res += &format!("\tZ{} = {};\n", i, self.stack[i].export_wrapped());
         }
 
         Self::export_cpp_impl(&self.instructions, &mut res);
@@ -1454,6 +1454,39 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         }
 
         res += "\treturn;\n}\n";
+
+        res += &format!(r#"
+template<typename T>
+struct EvaluationData {{
+    T *params;
+    T *buffer;
+    T *out;
+    size_t n; // Number of evaluations
+    size_t block_size; // Number of threads per block
+}};
+
+template<typename T>
+EvaluationData<T>* init_data(size_t n, size_t block_size) {{
+    EvaluationData<T>* data = (EvaluationData<T>*)malloc(sizeof(EvaluationData<T>));
+    size_t in_dimension = {in_dimension};
+    size_t out_dimension = {out_dimension};
+    data->n = n;
+    data->block_size = block_size;
+    cudaMalloc((void**)&data->params, n*in_dimension * sizeof(T));
+    cudaMalloc((void**)&data->buffer, sizeof(T)); // technically unused for now
+    cudaMalloc((void**)&data->out, n*out_dimension*sizeof(T));
+    return data;
+}}
+
+template<typename T>
+void destroy_data(EvaluationData<T>* data) {{
+    cudaFree(data->params);
+    cudaFree(data->buffer);
+    cudaFree(data->out);
+    free(data);
+}}
+
+       "#,in_dimension=self.param_count, out_dimension=self.result_indices.len());
 
         res += &format!(r#"
 extern "C" {{
@@ -1478,54 +1511,48 @@ extern "C" {{
         // APN TODO adjust 256 hardcoded below
         res += &format!(r#"
 extern "C" {{
-    void vec_{0}_double(double *params, double *buffer, double *out, size_t n) {{
-        double *d_params, *d_buffer, *d_out;
-        cudaMalloc((void**)&d_params, n*{1} * sizeof(double));
-        cudaMalloc((void**)&d_buffer, sizeof(double));
-        cudaMalloc((void**)&d_out, n*{2}*sizeof(double));
-        cudaMemcpy(d_params, params, n*{1} * sizeof(double), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_buffer, buffer, sizeof(double), cudaMemcpyHostToDevice);
-        int blockSize = 256; // Number of threads per block
+    void vec_{0}_double(double *params, double *buffer, double *out, EvaluationData<double>* data) {{
+        size_t n = data->n;
+        size_t in_dimension = {in_dimension};
+        size_t out_dimension = {out_dimension};
+        cudaMemcpy(data->params, params, n*in_dimension * sizeof(double), cudaMemcpyHostToDevice);
+        cudaMemcpy(data->buffer, buffer, sizeof(double), cudaMemcpyHostToDevice);
+        int blockSize = data->block_size; // Number of threads per block
         int gridSize = (n + blockSize - 1) / blockSize; // Number of blocks
-        cuda_{0}_double<<<gridSize,blockSize>>>(d_params, d_buffer, d_out,n);
+        cuda_{0}_double<<<gridSize,blockSize>>>(data->params, data->buffer, data->out,n);
         cudaDeviceSynchronize();
-        cudaMemcpy(out, d_out, n*{2}*sizeof(double), cudaMemcpyDeviceToHost);
-        cudaFree(d_params);
-        cudaFree(d_buffer);
-        cudaFree(d_out);
+        cudaMemcpy(out, data->out, n*out_dimension*sizeof(double), cudaMemcpyDeviceToHost);
         return;
     }}
 }}
-"#, function_name, self.param_count, self.result_indices.len());
+"#, function_name, in_dimension=self.param_count, out_dimension=self.result_indices.len());
 
         // APN TODO adjust 256 hardcoded below
         res += &format!(r#"
 extern "C" {{
-    void vec_{0}_complex(std::complex<double> *params, std::complex<double> *buffer, std::complex<double> *out, size_t n) {{
-        cuda::std::complex<double> *d_params, *d_buffer, *d_out;
-        cudaMalloc((void**)&d_params, n*{1} * sizeof(cuda::std::complex<double>));
-        cudaMalloc((void**)&d_buffer, sizeof(cuda::std::complex<double>));
-        cudaMalloc((void**)&d_out, n*{2}*sizeof(cuda::std::complex<double>));
-        cudaMemcpy(d_params, params, n*{1} * sizeof(cuda::std::complex<double>), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_buffer, buffer, sizeof(cuda::std::complex<double>), cudaMemcpyHostToDevice);
-        int blockSize = 256; // Number of threads per block
+    void vec_{0}_complex(std::complex<double> *params, std::complex<double> *buffer, std::complex<double> *out, EvaluationData<cuda::std::complex<double>>* data) {{
+        size_t n = data->n;
+        size_t in_dimension = {in_dimension};
+        size_t out_dimension = {out_dimension};
+        cudaMemcpy(data->params, params, n*in_dimension * sizeof(cuda::std::complex<double>), cudaMemcpyHostToDevice);
+        cudaMemcpy(data->buffer, buffer, sizeof(cuda::std::complex<double>), cudaMemcpyHostToDevice);
+        int blockSize = data->block_size; // Number of threads per block
         int gridSize = (n + blockSize - 1) / blockSize; // Number of blocks
-        cuda_{0}_complex<<<gridSize,blockSize>>>(d_params, d_buffer, d_out,n);
+        cuda_{0}_complex<<<gridSize,blockSize>>>(data->params, data->buffer, data->out,n);
         cudaDeviceSynchronize();
-        cudaMemcpy(out, d_out, n*{2}*sizeof(cuda::std::complex<double>), cudaMemcpyDeviceToHost);
-        cudaFree(d_params);
-        cudaFree(d_buffer);
-        cudaFree(d_out);
+        cudaMemcpy(out, data->out, n*out_dimension*sizeof(cuda::std::complex<double>), cudaMemcpyDeviceToHost);
         return;
     }}
 }}
-"#, function_name, self.param_count, self.result_indices.len());
+"#, function_name, in_dimension=self.param_count, out_dimension=self.result_indices.len());
 
 
         res += &format!(r#"
 extern "C" {{
     void {0}_double(double *params, double *buffer, double *out) {{
-        vec_{0}_double(params, buffer, out, 1);
+        EvaluationData<double>* data = init_data<double>(1, 256);
+        vec_{0}_double(params, buffer, out, data);
+        destroy_data(data);
         return;
     }}
 }}
@@ -1534,7 +1561,9 @@ extern "C" {{
         res += &format!(r#"
 extern "C" {{
     void {0}_complex(std::complex<double> *params, std::complex<double> *buffer, std::complex<double> *out) {{
-        vec_{0}_complex(params, buffer, out, 1);
+        EvaluationData<cuda::std::complex<double>>* data = init_data<cuda::std::complex<double>>(1, 256);
+        vec_{0}_complex(params, buffer, out, data);
+        destroy_data(data);
         return;
     }}
 }}
