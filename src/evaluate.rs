@@ -1372,6 +1372,8 @@ impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
     }
 }
 
+
+
 impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
     /// Create a C++ code representation of the evaluation tree.
     /// With `inline_asm` set to any value other than `None`,
@@ -1517,7 +1519,6 @@ extern "C" {{
 }}
 "#, name=function_name);
 
-        // APN TODO adjust 256 hardcoded below
         res += &format!(r#"
 extern "C" {{
     void {name}_vec_double(double *params, double *buffer, double *out, {name}_EvaluationData<double>* data) {{
@@ -1536,7 +1537,6 @@ extern "C" {{
 }}
 "#, name=function_name, in_dimension=self.param_count, out_dimension=self.result_indices.len());
 
-        // APN TODO adjust 256 hardcoded below
         res += &format!(r#"
 extern "C" {{
     void {name}_vec_complex(std::complex<double> *params, std::complex<double> *buffer, std::complex<double> *out, {name}_EvaluationData<cuda::std::complex<double>>* data) {{
@@ -1632,8 +1632,8 @@ extern "C" {{
             function_name
         );
 
-        res += &format!("\nextern \"C\" {{\n\tvoid vec_{0}_double(double *params, double *buffer, double *out, size_t n) {{\n\t\tfor (size_t j = 0; j < n ; j++) {{ {0}_double(params + {1}*j, buffer, out + {2}*j); }}\n\t}}\n}}\n", function_name, self.param_count, self.result_indices.len());
-        res += &format!("\nextern \"C\" {{\n\tvoid vec_{0}_complex(std::complex<double> *params, std::complex<double> *buffer,  std::complex<double> *out, size_t n) {{\n\t\tfor (size_t j = 0; j < n ; j++) {{ {0}_complex(params + {1}*j, buffer, out + {2}*j); }}\n\t}}\n}}\n", function_name, self.param_count, self.result_indices.len());
+        res += &format!("\nextern \"C\" {{\n\tvoid {0}_vec_double(double *params, double *buffer, double *out, size_t n) {{\n\t\tfor (size_t j = 0; j < n ; j++) {{ {0}_double(params + {1}*j, buffer, out + {2}*j); }}\n\t}}\n}}\n", function_name, self.param_count, self.result_indices.len());
+        res += &format!("\nextern \"C\" {{\n\tvoid {0}_vec_complex(std::complex<double> *params, std::complex<double> *buffer,  std::complex<double> *out, size_t n) {{\n\t\tfor (size_t j = 0; j < n ; j++) {{ {0}_complex(params + {1}*j, buffer, out + {2}*j); }}\n\t}}\n}}\n", function_name, self.param_count, self.result_indices.len());
 
         res
     }
