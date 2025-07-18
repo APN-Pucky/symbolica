@@ -4,10 +4,9 @@
 
 use std::{
     hash::{Hash, Hasher},
-    os::raw::c_ulong,
+    os::raw::{c_ulong, c_void},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering}, Arc, Mutex
     },
 };
 
@@ -1457,7 +1456,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
 
         res += &format!(r#"
 template<typename T>
-struct EvaluationData {{
+struct {name}_EvaluationData {{
     T *params;
     T *buffer;
     T *out;
@@ -1466,8 +1465,8 @@ struct EvaluationData {{
 }};
 
 template<typename T>
-EvaluationData<T>* init_data(size_t n, size_t block_size) {{
-    EvaluationData<T>* data = (EvaluationData<T>*)malloc(sizeof(EvaluationData<T>));
+{name}_EvaluationData<T>* {name}_init_data(size_t n, size_t block_size) {{
+    {name}_EvaluationData<T>* data = ({name}_EvaluationData<T>*)malloc(sizeof({name}_EvaluationData<T>));
     size_t in_dimension = {in_dimension};
     size_t out_dimension = {out_dimension};
     data->n = n;
@@ -1479,39 +1478,49 @@ EvaluationData<T>* init_data(size_t n, size_t block_size) {{
 }}
 
 template<typename T>
-void destroy_data(EvaluationData<T>* data) {{
+void {name}_destroy_data({name}_EvaluationData<T>* data) {{
     cudaFree(data->params);
     cudaFree(data->buffer);
     cudaFree(data->out);
     free(data);
 }}
 
-       "#,in_dimension=self.param_count, out_dimension=self.result_indices.len());
+// Since function above is templated we need to instantiate it for double and complex<double> types.
+// Also needed for Rust interfacing.
+extern "C" {{
+    {name}_EvaluationData<double>* {name}_init_data_cuda_double(size_t n, size_t block_size);
+    {name}_EvaluationData<cuda::std::complex<double>>* {name}_init_data_cuda_complex(size_t n, size_t block_size);
+    void {name}_destroy_data_cuda_double({name}_EvaluationData<double>* data);
+    void {name}_destroy_data_cuda_complex({name}_EvaluationData<cuda::std::complex<double>>* data);
+}}
+
+
+       "#,name=function_name,in_dimension=self.param_count, out_dimension=self.result_indices.len());
 
         res += &format!(r#"
 extern "C" {{
-    __global__ void cuda_{0}_double(double *params, double *buffer, double *out, size_t n) {{
+    __global__ void {name}_cuda_double(double *params, double *buffer, double *out, size_t n) {{
         int index = blockIdx.x * blockDim.x + threadIdx.x;
-        if(index < n) {0}(params, buffer, out, index);
+        if(index < n) {name}(params, buffer, out, index);
         return;
     }}
 }}
-"#, function_name);
+"#, name=function_name);
 
         res += &format!(r#"
 extern "C" {{
-    __global__ void cuda_{0}_complex(cuda::std::complex<double> *params, cuda::std::complex<double> *buffer, cuda::std::complex<double> *out, size_t n) {{
+    __global__ void {name}_cuda_complex(cuda::std::complex<double> *params, cuda::std::complex<double> *buffer, cuda::std::complex<double> *out, size_t n) {{
         int index = blockIdx.x * blockDim.x + threadIdx.x;
-        if(index < n) {0}(params, buffer, out, index);
+        if(index < n) {name}(params, buffer, out, index);
         return;
     }}
 }}
-"#, function_name);
+"#, name=function_name);
 
         // APN TODO adjust 256 hardcoded below
         res += &format!(r#"
 extern "C" {{
-    void vec_{0}_double(double *params, double *buffer, double *out, EvaluationData<double>* data) {{
+    void {name}_vec_double(double *params, double *buffer, double *out, {name}_EvaluationData<double>* data) {{
         size_t n = data->n;
         size_t in_dimension = {in_dimension};
         size_t out_dimension = {out_dimension};
@@ -1519,18 +1528,18 @@ extern "C" {{
         cudaMemcpy(data->buffer, buffer, sizeof(double), cudaMemcpyHostToDevice);
         int blockSize = data->block_size; // Number of threads per block
         int gridSize = (n + blockSize - 1) / blockSize; // Number of blocks
-        cuda_{0}_double<<<gridSize,blockSize>>>(data->params, data->buffer, data->out,n);
+        {name}_cuda_double<<<gridSize,blockSize>>>(data->params, data->buffer, data->out,n);
         cudaDeviceSynchronize();
         cudaMemcpy(out, data->out, n*out_dimension*sizeof(double), cudaMemcpyDeviceToHost);
         return;
     }}
 }}
-"#, function_name, in_dimension=self.param_count, out_dimension=self.result_indices.len());
+"#, name=function_name, in_dimension=self.param_count, out_dimension=self.result_indices.len());
 
         // APN TODO adjust 256 hardcoded below
         res += &format!(r#"
 extern "C" {{
-    void vec_{0}_complex(std::complex<double> *params, std::complex<double> *buffer, std::complex<double> *out, EvaluationData<cuda::std::complex<double>>* data) {{
+    void {name}_vec_complex(std::complex<double> *params, std::complex<double> *buffer, std::complex<double> *out, {name}_EvaluationData<cuda::std::complex<double>>* data) {{
         size_t n = data->n;
         size_t in_dimension = {in_dimension};
         size_t out_dimension = {out_dimension};
@@ -1538,36 +1547,36 @@ extern "C" {{
         cudaMemcpy(data->buffer, buffer, sizeof(cuda::std::complex<double>), cudaMemcpyHostToDevice);
         int blockSize = data->block_size; // Number of threads per block
         int gridSize = (n + blockSize - 1) / blockSize; // Number of blocks
-        cuda_{0}_complex<<<gridSize,blockSize>>>(data->params, data->buffer, data->out,n);
+        {name}_cuda_complex<<<gridSize,blockSize>>>(data->params, data->buffer, data->out,n);
         cudaDeviceSynchronize();
         cudaMemcpy(out, data->out, n*out_dimension*sizeof(cuda::std::complex<double>), cudaMemcpyDeviceToHost);
         return;
     }}
 }}
-"#, function_name, in_dimension=self.param_count, out_dimension=self.result_indices.len());
+"#, name=function_name, in_dimension=self.param_count, out_dimension=self.result_indices.len());
 
 
         res += &format!(r#"
 extern "C" {{
-    void {0}_double(double *params, double *buffer, double *out) {{
-        EvaluationData<double>* data = init_data<double>(1, 256);
-        vec_{0}_double(params, buffer, out, data);
-        destroy_data(data);
+    void {name}_double(double *params, double *buffer, double *out) {{
+        {name}_EvaluationData<double>* data = {name}_init_data<double>(1, 256);
+        {name}_vec_double(params, buffer, out, data);
+        {name}_destroy_data(data);
         return;
     }}
 }}
-"#, function_name);
+"#, name=function_name);
         
         res += &format!(r#"
 extern "C" {{
-    void {0}_complex(std::complex<double> *params, std::complex<double> *buffer, std::complex<double> *out) {{
-        EvaluationData<cuda::std::complex<double>>* data = init_data<cuda::std::complex<double>>(1, 256);
-        vec_{0}_complex(params, buffer, out, data);
-        destroy_data(data);
+    void {name}_complex(std::complex<double> *params, std::complex<double> *buffer, std::complex<double> *out) {{
+        {name}_EvaluationData<cuda::std::complex<double>>* data = {name}_init_data<cuda::std::complex<double>>(1, 256);
+        {name}_vec_complex(params, buffer, out, data);
+        {name}_destroy_data(data);
         return;
     }}
 }}
-"#, function_name);
+"#, name=function_name);
 
         res
     }
@@ -4509,10 +4518,16 @@ pub struct CompiledCode {
     function_name: String,
 }
 
+#[derive(Clone)]
+pub struct LoadSettings {
+    number_of_evaluations: usize,
+    block_size: usize,
+}
+
 impl CompiledCode {
     /// Load the evaluator from the compiled shared library.
-    pub fn load(&self) -> Result<CompiledEvaluator, String> {
-        CompiledEvaluator::load(&self.library_filename, &self.function_name)
+    pub fn load(&self, settings: LoadSettings) -> Result<CompiledEvaluator, String> {
+        CompiledEvaluator::load(&self.library_filename, &self.function_name, settings)
     }
 }
 
@@ -4533,7 +4548,7 @@ struct EvaluatorFunctions<'a> {
     >,
     vec_eval_double: libloading::Symbol<
         'a,
-        unsafe extern "C" fn(params: *const f64, buffer: *mut f64, out: *mut f64, n : usize),
+        unsafe extern "C" fn(params: *const f64, buffer: *mut f64, out: *mut f64, data : *mut c_void),
     >,
     vec_eval_complex: libloading::Symbol<
         'a,
@@ -4541,17 +4556,36 @@ struct EvaluatorFunctions<'a> {
             params: *const Complex<f64>,
             buffer: *mut Complex<f64>,
             out: *mut Complex<f64>,
-            n : usize,
+            data : *mut c_void,
         ),
     >,
+    init_data_double : libloading::Symbol<'a, unsafe extern "C" fn(n:usize,block_size:usize) -> *mut c_void>,
+    init_data_complex: libloading::Symbol<'a, unsafe extern "C" fn(n:usize,block_size:usize) -> *mut c_void>,
+    destroy_data_double: libloading::Symbol<'a, unsafe extern "C" fn(data: *mut c_void)>,
+    destroy_data_complex: libloading::Symbol<'a, unsafe extern "C" fn(data: *mut c_void)>,
     get_buffer_len: libloading::Symbol<'a, unsafe extern "C" fn() -> c_ulong>,
 }
 
 pub struct CompiledEvaluator {
     fn_name: String,
     library: Library,
+    // we retain the LoadSettings for later cloning
+    load_settings: LoadSettings,
     buffer_double: Vec<f64>,
     buffer_complex: Vec<Complex<f64>>,
+    data_double: *mut c_void,
+    data_complex: *mut c_void,
+}
+
+impl Drop for CompiledEvaluator {
+    fn drop(&mut self) {
+        // The library will be dropped automatically when the Arc is dropped.
+        // We just need to ensure that the function pointers are not used anymore.
+        unsafe {
+            (self.library.borrow_dependent().destroy_data_double)(self.data_double);
+            (self.library.borrow_dependent().destroy_data_complex)(self.data_complex);
+        }
+    }
 }
 
 self_cell!(
@@ -4573,7 +4607,7 @@ impl std::fmt::Debug for CompiledEvaluator {
 
 impl Clone for CompiledEvaluator {
     fn clone(&self) -> Self {
-        self.load_new_function(&self.fn_name).unwrap()
+        self.load_new_function(&self.fn_name, self.load_settings.clone()).unwrap()
     }
 }
 
@@ -4589,8 +4623,9 @@ impl CompiledEvaluatorFloat for f64 {
         eval.evaluate_double(args, out);
     }
     #[inline(always)]
-    fn vec_evaluate(eval: &mut CompiledEvaluator, args: &[Self], out: &mut [Self], n : usize) {
-        eval.vec_evaluate_double(args, out,n);
+    fn vec_evaluate(eval: &mut CompiledEvaluator, args: &[Self], out: &mut [Self], _n : usize) { //APN TODO keep or drop n
+        //APN TODO check array lengths valid here?
+        eval.vec_evaluate_double(args, out);
     }
 }
 
@@ -4600,48 +4635,68 @@ impl CompiledEvaluatorFloat for Complex<f64> {
         eval.evaluate_complex(args, out);
     }
     #[inline(always)]
-    fn vec_evaluate(eval: &mut CompiledEvaluator, args: &[Self], out: &mut [Self], n : usize) {
-        eval.vec_evaluate_complex(args, out,n);
+    fn vec_evaluate(eval: &mut CompiledEvaluator, args: &[Self], out: &mut [Self], _n : usize) { //APN TODO keep or drop n 
+        //APN TODO check array lengths valid here?
+        eval.vec_evaluate_complex(args, out);
     }
 }
 
 impl CompiledEvaluator {
     /// Load a new function from the same library.
-    pub fn load_new_function(&self, function_name: &str) -> Result<CompiledEvaluator, String> {
-        let library = unsafe {
-            Library::try_new::<String>(self.library.borrow_owner().clone(), |lib| {
-                Ok(EvaluatorFunctions {
-                    eval_double: lib
-                        .get(format!("{}_double", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    vec_eval_double: lib
-                        .get(format!("vec_{}_double", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    eval_complex: lib
-                        .get(format!("{}_complex", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    vec_eval_complex: lib
-                        .get(format!("vec_{}_complex", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    get_buffer_len: lib
-                        .get(format!("{}_get_buffer_len", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
+    pub fn load_new_function(&self, function_name: &str, load_settings: LoadSettings) -> Result<CompiledEvaluator, String> {
+        unsafe {
+            let library = 
+                Library::try_new::<String>(self.library.borrow_owner().clone(), |lib| {
+                    Ok(EvaluatorFunctions {
+                        eval_double: lib
+                            .get(format!("{}_double", function_name).as_bytes())
+                            .map_err(|e| e.to_string())?,
+                        vec_eval_double: lib
+                            .get(format!("{}_vec_double", function_name).as_bytes())
+                            .map_err(|e| e.to_string())?,
+                        eval_complex: lib
+                            .get(format!("{}_complex", function_name).as_bytes())
+                            .map_err(|e| e.to_string())?,
+                        vec_eval_complex: lib
+                            .get(format!("{}_vec_complex", function_name).as_bytes())
+                            .map_err(|e| e.to_string())?,
+                        get_buffer_len: lib
+                            .get(format!("{}_get_buffer_len", function_name).as_bytes())
+                            .map_err(|e| e.to_string())?,
+                        init_data_double: lib
+                            .get(format!("{}_init_data_double", function_name).as_bytes())
+                            .map_err(|e| e.to_string())?,
+                        init_data_complex: lib
+                            .get(format!("{}_init_data_complex", function_name).as_bytes())
+                            .map_err(|e| e.to_string())?,
+                        destroy_data_double: lib
+                            .get(format!("{}_destroy_data_double", function_name).as_bytes())
+                            .map_err(|e| e.to_string())?,
+                        destroy_data_complex: lib
+                            .get(format!("{}_destroy_data_complex", function_name).as_bytes())
+                            .map_err(|e| e.to_string())?,
+                    })
                 })
+            ?;
+
+            let len = unsafe { (library.borrow_dependent().get_buffer_len)() } as usize;
+            let data_double = (library.borrow_dependent().init_data_double)(load_settings.number_of_evaluations, load_settings.block_size);
+            let data_complex = (library.borrow_dependent().init_data_complex)(load_settings.number_of_evaluations, load_settings.block_size);
+
+            Ok(CompiledEvaluator {
+                fn_name: function_name.to_string(),
+                buffer_double: vec![0.; len],
+                buffer_complex: vec![Complex::new(0., 0.); len],
+                data_double,
+                data_complex,
+                library,
+                load_settings,
             })
-        }?;
-
-        let len = unsafe { (library.borrow_dependent().get_buffer_len)() } as usize;
-
-        Ok(CompiledEvaluator {
-            fn_name: function_name.to_string(),
-            buffer_double: vec![0.; len],
-            buffer_complex: vec![Complex::new(0., 0.); len],
-            library,
-        })
+        }
     }
 
     /// Load a compiled evaluator from a shared library.
-    pub fn load(file: &str, function_name: &str) -> Result<CompiledEvaluator, String> {
+    pub fn load(file: &str, function_name: &str, load_settings: LoadSettings) -> Result<CompiledEvaluator, String> {
         unsafe {
             let lib = match libloading::Library::new(file) {
                 Ok(lib) => lib,
@@ -4656,27 +4711,44 @@ impl CompiledEvaluator {
                         .get(format!("{}_double", function_name).as_bytes())
                         .map_err(|e| e.to_string())?,
                     vec_eval_double: lib
-                        .get(format!("vec_{}_double", function_name).as_bytes())
+                        .get(format!("{}_vec_double", function_name).as_bytes())
                         .map_err(|e| e.to_string())?,
                     eval_complex: lib
                         .get(format!("{}_complex", function_name).as_bytes())
                         .map_err(|e| e.to_string())?,
                     vec_eval_complex: lib
-                        .get(format!("vec_{}_complex", function_name).as_bytes())
+                        .get(format!("{}_vec_complex", function_name).as_bytes())
                         .map_err(|e| e.to_string())?,
                     get_buffer_len: lib
                         .get(format!("{}_get_buffer_len", function_name).as_bytes())
+                        .map_err(|e| e.to_string())?,
+                    init_data_double: lib
+                        .get(format!("{}_init_data_double", function_name).as_bytes())
+                        .map_err(|e| e.to_string())?,
+                    init_data_complex: lib
+                        .get(format!("{}_init_data_complex", function_name).as_bytes())
+                        .map_err(|e| e.to_string())?,
+                    destroy_data_double: lib
+                        .get(format!("{}_destroy_data_double", function_name).as_bytes())
+                        .map_err(|e| e.to_string())?,
+                    destroy_data_complex: lib
+                        .get(format!("{}_destroy_data_complex", function_name).as_bytes())
                         .map_err(|e| e.to_string())?,
                 })
             })?;
 
             let len = (library.borrow_dependent().get_buffer_len)() as usize;
+            let data_double = (library.borrow_dependent().init_data_double)(load_settings.number_of_evaluations, load_settings.block_size);
+            let data_complex = (library.borrow_dependent().init_data_complex)(load_settings.number_of_evaluations, load_settings.block_size);
 
             Ok(CompiledEvaluator {
                 fn_name: function_name.to_string(),
                 buffer_double: vec![0.; len],
                 buffer_complex: vec![Complex::new(0., 0.); len],
+                data_double,
+                data_complex,
                 library,
+                load_settings,
             })
         }
     }
@@ -4707,13 +4779,14 @@ impl CompiledEvaluator {
 
     /// Evaluate the compiled code with double-precision floating point numbers.
     #[inline(always)]
-    pub fn vec_evaluate_double(&mut self, args: &[f64], out: &mut [f64], n : usize) {
+    pub fn vec_evaluate_double(&mut self, args: &[f64], out: &mut [f64]) {
+        // APN TODO check array lengths valid here?
         unsafe {
             (self.library.borrow_dependent().vec_eval_double)(
                 args.as_ptr(),
                 self.buffer_double.as_mut_ptr(),
                 out.as_mut_ptr(),
-                n
+                self.data_double,
             )
         }
     }
@@ -4732,13 +4805,14 @@ impl CompiledEvaluator {
 
     /// Evaluate the compiled code with complex numbers.
     #[inline(always)]
-    pub fn vec_evaluate_complex(&mut self, args: &[Complex<f64>], out: &mut [Complex<f64>], n : usize ) {
+    pub fn vec_evaluate_complex(&mut self, args: &[Complex<f64>], out: &mut [Complex<f64>]) {
+        // APN TODO check array lengths valid here?
         unsafe {
             (self.library.borrow_dependent().vec_eval_complex)(
                 args.as_ptr(),
                 self.buffer_complex.as_mut_ptr(),
                 out.as_mut_ptr(),
-                n
+                self.data_complex,
             )
         }
     }

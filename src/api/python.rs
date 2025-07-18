@@ -54,8 +54,8 @@ use crate::{
         },
     },
     evaluate::{
-        CompileOptions, CompiledEvaluator, EvaluationFn, ExpressionEvaluator, FunctionMap,
-        InlineASM, FormatCPP, Instruction, OptimizationSettings, Slot,
+        CompileOptions, CompiledEvaluator, EvaluationFn, ExpressionEvaluator, FunctionMap, 
+        InlineASM, FormatCPP, Instruction, OptimizationSettings, Slot, LoadSettings,
     },
     graph::{GenerationSettings, Graph},
     id::{
@@ -11681,6 +11681,8 @@ impl PythonExpressionEvaluator {
         inline_asm = "default",
         optimization_level = 3,
         compiler_path = None,
+        number_of_evaluations = 1,
+        block_size = 1,
     ))]
     fn compile(
         &self,
@@ -11691,6 +11693,8 @@ impl PythonExpressionEvaluator {
         inline_asm: &str,
         optimization_level: u8,
         compiler_path: Option<&str>,
+        number_of_evaluations: usize,
+        block_size: usize,
     ) -> PyResult<PythonCompiledExpressionEvaluator> {
         let mut options = CompileOptions::default();
         options.optimization_level = optimization_level as usize;
@@ -11737,7 +11741,10 @@ impl PythonExpressionEvaluator {
                 .map_err(|e| {
                     exceptions::PyValueError::new_err(format!("Compilation error: {}", e))
                 })?
-                .load()
+                .load(LoadSettings {
+                    number_of_evaluations,
+                    block_size,
+                })
                 .map_err(|e| {
                     exceptions::PyValueError::new_err(format!("Library loading error: {}", e))
                 })?,
@@ -11760,15 +11767,18 @@ pub struct PythonCompiledExpressionEvaluator {
 impl PythonCompiledExpressionEvaluator {
     /// Load a compiled library, previously generated with `compile`.
     #[classmethod]
+    #[pyo3(signature = (filename, function_name, input_len, output_len, number_of_evaluations = 1, block_size = 1))]
     fn load(
         _cls: &Bound<'_, PyType>,
         filename: &str,
         function_name: &str,
         input_len: usize,
         output_len: usize,
+        number_of_evaluations: usize,
+        block_size: usize,
     ) -> PyResult<Self> {
         Ok(Self {
-            eval: CompiledEvaluator::load(filename, function_name)
+            eval: CompiledEvaluator::load(filename, function_name, LoadSettings {number_of_evaluations, block_size})
                 .map_err(|e| exceptions::PyValueError::new_err(format!("Load error: {}", e)))?,
             input_len,
             output_len,
