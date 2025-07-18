@@ -4548,7 +4548,7 @@ struct EvaluatorFunctions<'a> {
     >,
     vec_eval_double: libloading::Symbol<
         'a,
-        unsafe extern "C" fn(params: *const f64, buffer: *mut f64, out: *mut f64, data : *mut c_void),
+        unsafe extern "C" fn(params: *const f64, buffer: *mut f64, out: *mut f64, data : *const c_void),
     >,
     vec_eval_complex: libloading::Symbol<
         'a,
@@ -4556,13 +4556,13 @@ struct EvaluatorFunctions<'a> {
             params: *const Complex<f64>,
             buffer: *mut Complex<f64>,
             out: *mut Complex<f64>,
-            data : *mut c_void,
+            data : *const c_void,
         ),
     >,
-    init_data_double : libloading::Symbol<'a, unsafe extern "C" fn(n:usize,block_size:usize) -> *mut c_void>,
-    init_data_complex: libloading::Symbol<'a, unsafe extern "C" fn(n:usize,block_size:usize) -> *mut c_void>,
-    destroy_data_double: libloading::Symbol<'a, unsafe extern "C" fn(data: *mut c_void)>,
-    destroy_data_complex: libloading::Symbol<'a, unsafe extern "C" fn(data: *mut c_void)>,
+    init_data_double : libloading::Symbol<'a, unsafe extern "C" fn(n:usize,block_size:usize) -> *const c_void>,
+    init_data_complex: libloading::Symbol<'a, unsafe extern "C" fn(n:usize,block_size:usize) -> *const c_void>,
+    destroy_data_double: libloading::Symbol<'a, unsafe extern "C" fn(data: *const c_void)>,
+    destroy_data_complex: libloading::Symbol<'a, unsafe extern "C" fn(data: *const c_void)>,
     get_buffer_len: libloading::Symbol<'a, unsafe extern "C" fn() -> c_ulong>,
 }
 
@@ -4573,8 +4573,8 @@ pub struct CompiledEvaluator {
     load_settings: LoadSettings,
     buffer_double: Vec<f64>,
     buffer_complex: Vec<Complex<f64>>,
-    data_double: *mut c_void,
-    data_complex: *mut c_void,
+    data_double: *const c_void,
+    data_complex: *const c_void,
 }
 
 impl Drop for CompiledEvaluator {
@@ -4679,7 +4679,7 @@ impl CompiledEvaluator {
                 })
             ?;
 
-            let len = unsafe { (library.borrow_dependent().get_buffer_len)() } as usize;
+            let len =  (library.borrow_dependent().get_buffer_len)() as usize;
             let data_double = (library.borrow_dependent().init_data_double)(load_settings.number_of_evaluations, load_settings.block_size);
             let data_complex = (library.borrow_dependent().init_data_complex)(load_settings.number_of_evaluations, load_settings.block_size);
 
