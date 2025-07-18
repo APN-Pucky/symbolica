@@ -1372,7 +1372,11 @@ impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
     }
 }
 
-
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberClass {
+    RealF64,
+    ComplexF64,
+}
 
 impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
     /// Create a C++ code representation of the evaluation tree.
@@ -1387,6 +1391,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         include_header: bool,
         formatcpp : FormatCPP, 
         inline_asm: InlineASM,
+        number_class: NumberClass,
     ) -> Result<ExportedCode, std::io::Error> {
         let mut filename = filename.to_string();
         if !filename.ends_with(".cpp") {
@@ -1394,9 +1399,9 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         }
 
         let cpp = match formatcpp {
-            FormatCPP::ASM => self.export_asm_str(function_name, include_header, inline_asm),
-            FormatCPP::CUDA => self.export_cuda_str(function_name, include_header),
-            FormatCPP::CPP => self.export_cpp_str(function_name, include_header),
+            FormatCPP::ASM => self.export_asm_str(function_name, include_header, inline_asm), // APN TODO add number_class
+            FormatCPP::CUDA => self.export_cuda_str(function_name, include_header, number_class),
+            FormatCPP::CPP => self.export_cpp_str(function_name, include_header, number_class),
         };
 
         std::fs::write(&filename, cpp)?;
@@ -1406,11 +1411,24 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         })
     }
 
-    pub fn export_cuda_str(&self, function_name: &str, include_header: bool) -> String {
+    pub fn export_cuda_str(&self, function_name: &str, include_header: bool, number_class: NumberClass) -> String {
         let mut res = String::new();
         if include_header {
-            res += &"#include <cuda_runtime.h>\n#include <cuda/std/complex>\n#include <iostream>\n\n";
+            res += &"#include <cuda_runtime.h>\n";
+            res += &"#include <iostream>\n";
+            if number_class == NumberClass::ComplexF64 {
+                res += &"#include <cuda/std/complex>\n";
+            }
         };
+
+        if number_class == NumberClass::ComplexF64 {
+            res += &"typedef cuda::std::complex<double> CudaNumber;\n";
+            res += &"typedef std::complex<double> Number;\n";
+        }
+        else if number_class == NumberClass::RealF64 {
+            res += &"typedef double CudaNumber;\n";
+            res += &"typedef double Number;\n";
+        }
 
         res += &format!(
             "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
@@ -1490,18 +1508,17 @@ void {name}_destroy_data({name}_EvaluationData<T>* data) {{
 // Since function above is templated we need to instantiate it for double and complex<double> types.
 // Also needed for Rust interfacing.
 extern "C" {{
-    {name}_EvaluationData<double>* {name}_init_data_cuda_double(size_t n, size_t block_size);
-    {name}_EvaluationData<cuda::std::complex<double>>* {name}_init_data_cuda_complex(size_t n, size_t block_size);
-    void {name}_destroy_data_cuda_double({name}_EvaluationData<double>* data);
-    void {name}_destroy_data_cuda_complex({name}_EvaluationData<cuda::std::complex<double>>* data);
+    {name}_EvaluationData<CudaNumber>* {name}_init_data(size_t n, size_t block_size);
+    void {name}_destroy_data({name}_EvaluationData<CudaNumber>* data);
 }}
 
 
        "#,name=function_name,in_dimension=self.param_count, out_dimension=self.result_indices.len());
 
+
         res += &format!(r#"
 extern "C" {{
-    __global__ void {name}_cuda_double(double *params, double *buffer, double *out, size_t n) {{
+    __global__ void {name}_cuda(CudaNumber *params, CudaNumber *buffer, CudaNumber *out, size_t n) {{
         int index = blockIdx.x * blockDim.x + threadIdx.x;
         if(index < n) {name}(params, buffer, out, index);
         return;
@@ -1511,82 +1528,41 @@ extern "C" {{
 
         res += &format!(r#"
 extern "C" {{
-    __global__ void {name}_cuda_complex(cuda::std::complex<double> *params, cuda::std::complex<double> *buffer, cuda::std::complex<double> *out, size_t n) {{
-        int index = blockIdx.x * blockDim.x + threadIdx.x;
-        if(index < n) {name}(params, buffer, out, index);
-        return;
-    }}
-}}
-"#, name=function_name);
-
-        res += &format!(r#"
-extern "C" {{
-    void {name}_vec_double(double *params, double *buffer, double *out, {name}_EvaluationData<double>* data) {{
+    void {name}_vec(Number *params, Number *buffer, Number *out, {name}_EvaluationData<CudaNumber>* data) {{
         size_t n = data->n;
         size_t in_dimension = {in_dimension};
         size_t out_dimension = {out_dimension};
-        cudaMemcpy(data->params, params, n*in_dimension * sizeof(double), cudaMemcpyHostToDevice);
-        cudaMemcpy(data->buffer, buffer, sizeof(double), cudaMemcpyHostToDevice);
+        cudaMemcpy(data->params, params, n*in_dimension * sizeof(CudaNumber), cudaMemcpyHostToDevice);
+        cudaMemcpy(data->buffer, buffer, sizeof(CudaNumber), cudaMemcpyHostToDevice);
         int blockSize = data->block_size; // Number of threads per block
         int gridSize = (n + blockSize - 1) / blockSize; // Number of blocks
-        {name}_cuda_double<<<gridSize,blockSize>>>(data->params, data->buffer, data->out,n);
+        {name}_cuda<<<gridSize,blockSize>>>(data->params, data->buffer, data->out,n);
         cudaDeviceSynchronize();
-        cudaMemcpy(out, data->out, n*out_dimension*sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(out, data->out, n*out_dimension*sizeof(CudaNumber), cudaMemcpyDeviceToHost);
         return;
     }}
 }}
 "#, name=function_name, in_dimension=self.param_count, out_dimension=self.result_indices.len());
-
-        res += &format!(r#"
-extern "C" {{
-    void {name}_vec_complex(std::complex<double> *params, std::complex<double> *buffer, std::complex<double> *out, {name}_EvaluationData<cuda::std::complex<double>>* data) {{
-        size_t n = data->n;
-        size_t in_dimension = {in_dimension};
-        size_t out_dimension = {out_dimension};
-        cudaMemcpy(data->params, params, n*in_dimension * sizeof(cuda::std::complex<double>), cudaMemcpyHostToDevice);
-        cudaMemcpy(data->buffer, buffer, sizeof(cuda::std::complex<double>), cudaMemcpyHostToDevice);
-        int blockSize = data->block_size; // Number of threads per block
-        int gridSize = (n + blockSize - 1) / blockSize; // Number of blocks
-        {name}_cuda_complex<<<gridSize,blockSize>>>(data->params, data->buffer, data->out,n);
-        cudaDeviceSynchronize();
-        cudaMemcpy(out, data->out, n*out_dimension*sizeof(cuda::std::complex<double>), cudaMemcpyDeviceToHost);
-        return;
-    }}
-}}
-"#, name=function_name, in_dimension=self.param_count, out_dimension=self.result_indices.len());
-
-
-        res += &format!(r#"
-extern "C" {{
-    void {name}_double(double *params, double *buffer, double *out) {{
-        {name}_EvaluationData<double>* data = {name}_init_data<double>(1, 256);
-        {name}_vec_double(params, buffer, out, data);
-        {name}_destroy_data(data);
-        return;
-    }}
-}}
-"#, name=function_name);
-        
-        res += &format!(r#"
-extern "C" {{
-    void {name}_complex(std::complex<double> *params, std::complex<double> *buffer, std::complex<double> *out) {{
-        {name}_EvaluationData<cuda::std::complex<double>>* data = {name}_init_data<cuda::std::complex<double>>(1, 256);
-        {name}_vec_complex(params, buffer, out, data);
-        {name}_destroy_data(data);
-        return;
-    }}
-}}
-"#, name=function_name);
 
         res
     }
 
 
-    pub fn export_cpp_str(&self, function_name: &str, include_header: bool) -> String {
+    pub fn export_cpp_str(&self, function_name: &str, include_header: bool, number_class : NumberClass) -> String {
         let mut res = String::new();
         if include_header {
-            res += "#include <iostream>\n#include <complex>\n#include <cmath>\n\n";
+            res += "#include <iostream>\n#include <cmath>\n\n";
+            if number_class == NumberClass::ComplexF64 {
+                res += "#include <complex>\n";
+            }
         };
+
+        if number_class == NumberClass::ComplexF64 {
+            res += &"typedef std::complex<double> Number;\n";
+        }
+        else if number_class == NumberClass::RealF64 {
+            res += &"typedef double Number;\n";
+        }
 
         res += &format!(
             "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
@@ -1615,26 +1591,73 @@ extern "C" {{
 
         res += "\treturn;\n}\n";
 
-        if self.stack.iter().all(|x| x.is_real()) {
-            res += &format!(
-                "\nextern \"C\" {{\n\tvoid {0}_double(double *params, double *buffer, double *out) {{\n\t\t{0}(params, buffer, out);\n\t\treturn;\n\t}}\n}}\n",
-                function_name
-            );
-        } else {
-            res += &format!(
-                "extern \"C\" void {}_double(const double *params, double* Z, double *out)\n{{\n\tstd::cout << \"Cannot evaluate complex function with doubles\" << std::endl;\n\treturn; \n}}",
-                function_name
-            );
-        }
+
+        res += &format!(r#"
+template<typename T>
+struct {name}_EvaluationData {{
+    //T *params;
+    //T *buffer;
+    //T *out;
+    size_t n; // Number of evaluations
+    size_t block_size; // Number of threads per block
+}};
+
+template<typename T>
+{name}_EvaluationData<T>* {name}_init_data(size_t n, size_t block_size) {{
+    {name}_EvaluationData<T>* data = ({name}_EvaluationData<T>*)malloc(sizeof({name}_EvaluationData<T>));
+    size_t in_dimension = {in_dimension};
+    size_t out_dimension = {out_dimension};
+    data->n = n;
+    data->block_size = block_size;
+    //data->params = (T*)malloc(n*in_dimension * sizeof(T));
+    //data->buffer = (T*)malloc(sizeof(T)); // technically unused for now
+    //data->out = (T*)malloc(n*out_dimension*sizeof(T));
+    return data;
+}}
+
+template<typename T>
+void {name}_destroy_data({name}_EvaluationData<T>* data) {{
+    //free(data->params);
+    //free(data->buffer);
+    //free(data->out);
+    free(data);
+}}
+
+// Since function above is templated we need to instantiate it for double and complex<double> types.
+// Also needed for Rust interfacing.
+extern "C" {{
+    {name}_EvaluationData<Number>* {name}_init_data(size_t n, size_t block_size);
+    void {name}_destroy_data({name}_EvaluationData<Number>* data);
+}}
+
+
+       "#,name=function_name,in_dimension=self.param_count, out_dimension=self.result_indices.len());
+
+       // if there are non-reals we can not use double evaluation
+       assert!( !( !self.stack.iter().all(|x| x.is_real()) && number_class == NumberClass::RealF64), "Cannot export complex function with real numbers");
+       // APN TODO or instead of assert return error?
 
         res += &format!(
-            "\nextern \"C\" {{\n\tvoid {0}_complex(std::complex<double> *params, std::complex<double> *buffer,  std::complex<double> *out) {{\n\t\t{0}(params, buffer, out);\n\t\treturn;\n\t}}\n}}\n",
-            function_name
+            r#"
+extern "C" {{
+	void {name}_cpp(Number *params, Number *buffer, Number *out) {{
+		{name}(params, buffer, out);
+		return;
+	}}
+}}
+"#,
+            name=function_name
         );
 
-        res += &format!("\nextern \"C\" {{\n\tvoid {0}_vec_double(double *params, double *buffer, double *out, size_t n) {{\n\t\tfor (size_t j = 0; j < n ; j++) {{ {0}_double(params + {1}*j, buffer, out + {2}*j); }}\n\t}}\n}}\n", function_name, self.param_count, self.result_indices.len());
-        res += &format!("\nextern \"C\" {{\n\tvoid {0}_vec_complex(std::complex<double> *params, std::complex<double> *buffer,  std::complex<double> *out, size_t n) {{\n\t\tfor (size_t j = 0; j < n ; j++) {{ {0}_complex(params + {1}*j, buffer, out + {2}*j); }}\n\t}}\n}}\n", function_name, self.param_count, self.result_indices.len());
-
+        res += &format!(r#"
+extern "C" {{
+	void {name}_vec(Number *params, Number *buffer, Number *out, {name}_EvaluationData<Number>* data) {{
+        size_t in_dimension = {in_dimension};
+        size_t out_dimension = {out_dimension};
+		for (size_t j = 0; j < data->n ; j++) {{ {name}_cpp(params + in_dimension*j, buffer, out + out_dimension*j); }}
+	}}
+}}
+"#, name=function_name, in_dimension=self.param_count, out_dimension=self.result_indices.len());
         res
     }
 

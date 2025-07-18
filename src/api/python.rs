@@ -55,7 +55,7 @@ use crate::{
     },
     evaluate::{
         CompileOptions, CompiledEvaluator, EvaluationFn, ExpressionEvaluator, FunctionMap, 
-        InlineASM, FormatCPP, Instruction, OptimizationSettings, Slot, LoadSettings,
+        InlineASM, FormatCPP, Instruction, OptimizationSettings, Slot, LoadSettings, NumberClass,
     },
     graph::{GenerationSettings, Graph},
     id::{
@@ -11681,6 +11681,7 @@ impl PythonExpressionEvaluator {
         inline_asm = "default",
         optimization_level = 3,
         compiler_path = None,
+        number_class = "realf64",
         number_of_evaluations = 1,
         block_size = 1,
     ))]
@@ -11693,6 +11694,7 @@ impl PythonExpressionEvaluator {
         inline_asm: &str,
         optimization_level: u8,
         compiler_path: Option<&str>,
+        number_class : &str,
         number_of_evaluations: usize,
         block_size: usize,
     ) -> PyResult<PythonCompiledExpressionEvaluator> {
@@ -11710,6 +11712,16 @@ impl PythonExpressionEvaluator {
                 return Err(exceptions::PyValueError::new_err(
                     "Invalid format specified.",
                 ))
+            }
+        };
+
+        let number_class = match number_class.to_lowercase().as_str() {
+            "realf64" => NumberClass::RealF64,
+            "complexf64" => NumberClass::ComplexF64,
+            _ => {
+                return Err(exceptions::PyValueError::new_err(
+                    "Invalid number class specified.",
+                ));
             }
         };
 
@@ -11735,7 +11747,7 @@ impl PythonExpressionEvaluator {
         Ok(PythonCompiledExpressionEvaluator {
             eval: self
                 .eval_complex
-                .export_cpp(filename, function_name, true, formatcpp, inline_asm)
+                .export_cpp(filename, function_name, true, formatcpp, inline_asm, number_class)
                 .map_err(|e| exceptions::PyValueError::new_err(format!("Export error: {}", e)))?
                 .compile(library_name, options)
                 .map_err(|e| {
