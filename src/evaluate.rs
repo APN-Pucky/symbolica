@@ -4520,8 +4520,8 @@ pub struct CompiledCode {
 
 #[derive(Clone)]
 pub struct LoadSettings {
-    number_of_evaluations: usize,
-    block_size: usize,
+    pub number_of_evaluations: usize,
+    pub block_size: usize,
 }
 
 impl CompiledCode {
@@ -4598,6 +4598,7 @@ self_cell!(
 );
 
 unsafe impl Send for CompiledEvaluator {}
+unsafe impl Sync for CompiledEvaluator {}
 
 impl std::fmt::Debug for CompiledEvaluator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
