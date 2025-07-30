@@ -1377,6 +1377,23 @@ pub enum NumberClass {
     RealF64,
     ComplexF64,
 }
+//
+//struct RealF64;
+//struct ComplexF64;
+//
+//trait TypeMap {
+//    type Output;
+//}
+//
+//// Implementations for the marker types
+//impl TypeMap for RealF64 {
+//    type Output = f64;
+//}
+//
+//impl TypeMap for ComplexF64 {
+//    type Output = Complex<f64>;
+//}
+
 
 impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
     /// Create a C++ code representation of the evaluation tree.
@@ -1392,7 +1409,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         formatcpp : FormatCPP, 
         inline_asm: InlineASM,
         number_class: NumberClass,
-    ) -> Result<ExportedCode, std::io::Error> {
+    ) -> Result<ExportedCode<T>, std::io::Error> {
         let mut filename = filename.to_string();
         if !filename.ends_with(".cpp") {
             filename += ".cpp";
@@ -1405,9 +1422,10 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         };
 
         std::fs::write(&filename, cpp)?;
-        Ok(ExportedCode {
+        Ok(ExportedCode::<T> {
             source_filename: filename,
             function_name: function_name.to_string(),
+            _phantom: std::marker::PhantomData,
         })
     }
 
@@ -4532,187 +4550,147 @@ impl<T: Real> EvalTree<T> {
     }
 }
 
-pub struct ExportedCode {
+pub struct ExportedCode<T> {
     source_filename: String,
     function_name: String,
+    // APN TODO I don't like this, but seems to work for now
+    _phantom: std::marker::PhantomData<T>,
 }
-pub struct CompiledCode {
+pub struct CompiledCode<T> {
     library_filename: String,
     function_name: String,
+    // APN TODO I don't like this, but seems to work for now
+    _phantom: std::marker::PhantomData<T>,
 }
 
 #[derive(Clone)]
 pub struct LoadSettings {
     pub number_of_evaluations: usize,
-    pub block_size: usize,
+    pub block_size: usize, //APN TODO rename to thread_size or sth.
 }
 
-impl CompiledCode {
+impl<T : Default + Copy> CompiledCode<T> {
     /// Load the evaluator from the compiled shared library.
-    pub fn load(&self, settings: LoadSettings) -> Result<CompiledEvaluator, String> {
+    pub fn load(&self, settings: LoadSettings) -> Result<CompiledEvaluator<T>, String> {
         CompiledEvaluator::load(&self.library_filename, &self.function_name, settings)
     }
 }
 
-type L = std::sync::Arc<libloading::Library>;
 
-struct EvaluatorFunctions<'a> {
-    eval_double: libloading::Symbol<
-        'a,
-        unsafe extern "C" fn(params: *const f64, buffer: *mut f64, out: *mut f64),
-    >,
-    eval_complex: libloading::Symbol<
-        'a,
-        unsafe extern "C" fn(
-            params: *const Complex<f64>,
-            buffer: *mut Complex<f64>,
-            out: *mut Complex<f64>,
-        ),
-    >,
-    vec_eval_double: libloading::Symbol<
-        'a,
-        unsafe extern "C" fn(params: *const f64, buffer: *mut f64, out: *mut f64, data : *const c_void),
-    >,
-    vec_eval_complex: libloading::Symbol<
-        'a,
-        unsafe extern "C" fn(
-            params: *const Complex<f64>,
-            buffer: *mut Complex<f64>,
-            out: *mut Complex<f64>,
-            data : *const c_void,
-        ),
-    >,
-    init_data_double : libloading::Symbol<'a, unsafe extern "C" fn(n:usize,block_size:usize) -> *const c_void>,
-    init_data_complex: libloading::Symbol<'a, unsafe extern "C" fn(n:usize,block_size:usize) -> *const c_void>,
-    destroy_data_double: libloading::Symbol<'a, unsafe extern "C" fn(data: *const c_void)>,
-    destroy_data_complex: libloading::Symbol<'a, unsafe extern "C" fn(data: *const c_void)>,
-    get_buffer_len: libloading::Symbol<'a, unsafe extern "C" fn() -> c_ulong>,
+type EvalType<T> = unsafe extern "C" fn(params: *const T, buffer: *mut T, out: *mut T);
+type VecEvalType<T> = unsafe extern "C" fn(
+    params: *const T,
+    buffer: *mut T,
+    out: *mut T,
+    data: *const c_void,
+);
+type InitDataType = unsafe extern "C" fn(n: usize, block_size: usize) -> *const c_void;
+type DestroyDataType = unsafe extern "C" fn(data: *const c_void);
+type GetBufferLenType = unsafe extern "C" fn() -> c_ulong;
+
+struct EvaluatorFunctions<T> {
+    eval: unsafe extern "C" fn(*const T, *mut T, *mut T),
+    vec_eval: unsafe extern "C" fn(*const T, *mut T, *mut T, *const c_void),
+    init_data: unsafe extern "C" fn(usize, usize) -> *const c_void,
+    destroy_data: unsafe extern "C" fn(*const c_void),
+    get_buffer_len: unsafe extern "C" fn() -> c_ulong,
 }
 
-pub struct CompiledEvaluator {
-    fn_name: String,
-    library: Library,
-    // we retain the LoadSettings for later cloning
-    load_settings: LoadSettings,
-    buffer_double: Vec<f64>,
-    buffer_complex: Vec<Complex<f64>>,
-    data_double: *const c_void,
-    data_complex: *const c_void,
-}
-
-impl Drop for CompiledEvaluator {
-    fn drop(&mut self) {
-        // The library will be dropped automatically when the Arc is dropped.
-        // We just need to ensure that the function pointers are not used anymore.
+impl<T: Default + Clone> EvaluatorFunctions<T> {
+    /// Create a new EvaluatorFunctions from a loaded library.
+    pub fn new(lib: &libloading::Library, function_name: &str) -> Result<Self, String> {
         unsafe {
-            (self.library.borrow_dependent().destroy_data_double)(self.data_double);
-            (self.library.borrow_dependent().destroy_data_complex)(self.data_complex);
+            let eval: libloading::Symbol<EvalType<T>> = lib
+                .get(format!("{}", function_name).as_bytes())
+                .map_err(|e| e.to_string())?;
+            let vec_eval: libloading::Symbol<VecEvalType<T>> = lib
+                .get(format!("{}_vec", function_name).as_bytes())
+                .map_err(|e| e.to_string())?;
+            let get_buffer_len: libloading::Symbol<GetBufferLenType> = lib
+                .get(format!("{}_get_buffer_len", function_name).as_bytes())
+                .map_err(|e| e.to_string())?;
+            let init_data: libloading::Symbol<InitDataType> = lib
+                .get(format!("{}_init_data", function_name).as_bytes())
+                .map_err(|e| e.to_string())?;
+            let destroy_data: libloading::Symbol<DestroyDataType> = lib
+                .get(format!("{}_destroy_data", function_name).as_bytes())
+                .map_err(|e| e.to_string())?;
+
+            Ok(EvaluatorFunctions {
+                eval: *eval,
+                vec_eval: *vec_eval,
+                get_buffer_len: *get_buffer_len,
+                init_data: *init_data,
+                destroy_data: *destroy_data,
+            })
         }
     }
 }
 
-self_cell!(
-    struct Library {
-        owner: L,
+pub struct CompiledEvaluator<T: 'static + Default + Clone> {
+    fn_name: String,
+    library: Library<T>,
+    // we retain the LoadSettings for later cloning
+    load_settings: LoadSettings,
+    buffer: Vec<T>,
+    data: *const c_void,
+}
 
-        #[covariant]
-        dependent: EvaluatorFunctions,
+impl<T: Default + Clone> Drop for CompiledEvaluator<T> {
+    fn drop(&mut self) {
+        // The library will be dropped automatically when the Arc is dropped.
+        // We just need to ensure that the function pointers are not used anymore.
+        unsafe {
+            (self.library.dependent.destroy_data)(self.data);
+        }
     }
-);
+}
 
-unsafe impl Send for CompiledEvaluator {}
-unsafe impl Sync for CompiledEvaluator {}
+struct Library<T> {
+    owner: std::sync::Arc<libloading::Library>,
+    dependent: EvaluatorFunctions<T>,
+}
 
-impl std::fmt::Debug for CompiledEvaluator {
+impl<T: Default + Clone> Library<T> {
+    /// Create a new Library from a loaded library.
+    pub fn new(lib: std::sync::Arc<libloading::Library>, function_name: &str) -> Result<Self, String> {
+        let dependent = EvaluatorFunctions::new(&lib, function_name)?;
+        Ok(Library {
+            owner: lib,
+            dependent,
+        })
+    }
+}
+
+unsafe impl<T: Default + Clone> Send for CompiledEvaluator<T> {}
+unsafe impl<T: Default + Clone> Sync for CompiledEvaluator<T> {}
+
+impl<T: Default + Clone> std::fmt::Debug for CompiledEvaluator<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "CompiledEvaluator({})", self.fn_name)
     }
 }
 
-impl Clone for CompiledEvaluator {
+impl<T: Default + Clone> Clone for CompiledEvaluator<T> {
     fn clone(&self) -> Self {
         self.load_new_function(&self.fn_name, self.load_settings.clone()).unwrap()
     }
 }
 
 /// A floating point type that can be used for compiled evaluation.
-pub trait CompiledEvaluatorFloat: Sized {
-    fn evaluate(eval: &mut CompiledEvaluator, args: &[Self], out: &mut [Self]);
-    fn vec_evaluate(eval: &mut CompiledEvaluator, args: &[Self], out: &mut [Self], n : usize);
-}
+impl<T: Default + Clone> CompiledEvaluator<T> {
 
-impl CompiledEvaluatorFloat for f64 {
-    #[inline(always)]
-    fn evaluate(eval: &mut CompiledEvaluator, args: &[Self], out: &mut [Self]) {
-        eval.evaluate_double(args, out);
-    }
-    #[inline(always)]
-    fn vec_evaluate(eval: &mut CompiledEvaluator, args: &[Self], out: &mut [Self], _n : usize) { //APN TODO keep or drop n
-        //APN TODO check array lengths valid here?
-        eval.vec_evaluate_double(args, out);
-    }
-}
-
-impl CompiledEvaluatorFloat for Complex<f64> {
-    #[inline(always)]
-    fn evaluate(eval: &mut CompiledEvaluator, args: &[Self], out: &mut [Self]) {
-        eval.evaluate_complex(args, out);
-    }
-    #[inline(always)]
-    fn vec_evaluate(eval: &mut CompiledEvaluator, args: &[Self], out: &mut [Self], _n : usize) { //APN TODO keep or drop n 
-        //APN TODO check array lengths valid here?
-        eval.vec_evaluate_complex(args, out);
-    }
-}
-
-impl CompiledEvaluator {
     /// Load a new function from the same library.
-    pub fn load_new_function(&self, function_name: &str, load_settings: LoadSettings) -> Result<CompiledEvaluator, String> {
+    pub fn load_new_function(&self, function_name: &str, load_settings: LoadSettings) -> Result<CompiledEvaluator<T>, String> {
+        let library = Library::new(self.library.owner.clone(), function_name)?;
         unsafe {
-            let library = 
-                Library::try_new::<String>(self.library.borrow_owner().clone(), |lib| {
-                    Ok(EvaluatorFunctions {
-                        eval_double: lib
-                            .get(format!("{}_double", function_name).as_bytes())
-                            .map_err(|e| e.to_string())?,
-                        vec_eval_double: lib
-                            .get(format!("{}_vec_double", function_name).as_bytes())
-                            .map_err(|e| e.to_string())?,
-                        eval_complex: lib
-                            .get(format!("{}_complex", function_name).as_bytes())
-                            .map_err(|e| e.to_string())?,
-                        vec_eval_complex: lib
-                            .get(format!("{}_vec_complex", function_name).as_bytes())
-                            .map_err(|e| e.to_string())?,
-                        get_buffer_len: lib
-                            .get(format!("{}_get_buffer_len", function_name).as_bytes())
-                            .map_err(|e| e.to_string())?,
-                        init_data_double: lib
-                            .get(format!("{}_init_data_double", function_name).as_bytes())
-                            .map_err(|e| e.to_string())?,
-                        init_data_complex: lib
-                            .get(format!("{}_init_data_complex", function_name).as_bytes())
-                            .map_err(|e| e.to_string())?,
-                        destroy_data_double: lib
-                            .get(format!("{}_destroy_data_double", function_name).as_bytes())
-                            .map_err(|e| e.to_string())?,
-                        destroy_data_complex: lib
-                            .get(format!("{}_destroy_data_complex", function_name).as_bytes())
-                            .map_err(|e| e.to_string())?,
-                    })
-                })
-            ?;
-
-            let len =  (library.borrow_dependent().get_buffer_len)() as usize;
-            let data_double = (library.borrow_dependent().init_data_double)(load_settings.number_of_evaluations, load_settings.block_size);
-            let data_complex = (library.borrow_dependent().init_data_complex)(load_settings.number_of_evaluations, load_settings.block_size);
+            let len = (library.dependent.get_buffer_len)() as usize;
+            let data = (library.dependent.init_data)(load_settings.number_of_evaluations, load_settings.block_size);
 
             Ok(CompiledEvaluator {
                 fn_name: function_name.to_string(),
-                buffer_double: vec![0.; len],
-                buffer_complex: vec![Complex::new(0., 0.); len],
-                data_double,
-                data_complex,
+                buffer: vec![T::default(); len],
+                data,
                 library,
                 load_settings,
             })
@@ -4720,7 +4698,7 @@ impl CompiledEvaluator {
     }
 
     /// Load a compiled evaluator from a shared library.
-    pub fn load(file: &str, function_name: &str, load_settings: LoadSettings) -> Result<CompiledEvaluator, String> {
+    pub fn load(file: &str, function_name: &str, load_settings: LoadSettings) -> Result<CompiledEvaluator<T>, String> {
         unsafe {
             let lib = match libloading::Library::new(file) {
                 Ok(lib) => lib,
@@ -4729,114 +4707,42 @@ impl CompiledEvaluator {
                 }
             };
 
-            let library = Library::try_new::<String>(std::sync::Arc::new(lib), |lib| {
-                Ok(EvaluatorFunctions {
-                    eval_double: lib
-                        .get(format!("{}_double", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    vec_eval_double: lib
-                        .get(format!("{}_vec_double", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    eval_complex: lib
-                        .get(format!("{}_complex", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    vec_eval_complex: lib
-                        .get(format!("{}_vec_complex", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    get_buffer_len: lib
-                        .get(format!("{}_get_buffer_len", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    init_data_double: lib
-                        .get(format!("{}_init_data_double", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    init_data_complex: lib
-                        .get(format!("{}_init_data_complex", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    destroy_data_double: lib
-                        .get(format!("{}_destroy_data_double", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                    destroy_data_complex: lib
-                        .get(format!("{}_destroy_data_complex", function_name).as_bytes())
-                        .map_err(|e| e.to_string())?,
-                })
-            })?;
+            let lib_arc = std::sync::Arc::new(lib);
+            let library = Library::new(lib_arc, function_name)?;
 
-            let len = (library.borrow_dependent().get_buffer_len)() as usize;
-            let data_double = (library.borrow_dependent().init_data_double)(load_settings.number_of_evaluations, load_settings.block_size);
-            let data_complex = (library.borrow_dependent().init_data_complex)(load_settings.number_of_evaluations, load_settings.block_size);
+            let len = (library.dependent.get_buffer_len)() as usize;
+            let data = (library.dependent.init_data)(load_settings.number_of_evaluations, load_settings.block_size);
 
             Ok(CompiledEvaluator {
                 fn_name: function_name.to_string(),
-                buffer_double: vec![0.; len],
-                buffer_complex: vec![Complex::new(0., 0.); len],
-                data_double,
-                data_complex,
+                buffer: vec![T::default(); len],
+                data,
                 library,
                 load_settings,
             })
         }
     }
-
     /// Evaluate the compiled code.
     #[inline(always)]
-    pub fn evaluate<T: CompiledEvaluatorFloat>(&mut self, args: &[T], out: &mut [T]) {
-        T::evaluate(self, args, out);
+    pub fn evaluate(&mut self, args: &[T], out: &mut [T]) {
+        unsafe {
+            (self.library.dependent.eval)(
+                args.as_ptr(),
+                self.buffer.as_mut_ptr(),
+                out.as_mut_ptr(),
+            )
+        }
     }
-
     /// Evaluate the compiled code.
     #[inline(always)]
-    pub fn vec_evaluate<T: CompiledEvaluatorFloat>(&mut self, args: &[T], out: &mut [T], n :usize) {
-        T::vec_evaluate(self, args, out, n);
-    }
-
-    /// Evaluate the compiled code with double-precision floating point numbers.
-    #[inline(always)]
-    pub fn evaluate_double(&mut self, args: &[f64], out: &mut [f64]) {
-        unsafe {
-            (self.library.borrow_dependent().eval_double)(
-                args.as_ptr(),
-                self.buffer_double.as_mut_ptr(),
-                out.as_mut_ptr(),
-            )
-        }
-    }
-
-    /// Evaluate the compiled code with double-precision floating point numbers.
-    #[inline(always)]
-    pub fn vec_evaluate_double(&mut self, args: &[f64], out: &mut [f64]) {
+    fn vec_evaluate(&mut self, args: &[T], out: &mut [T], n : usize) {
         // APN TODO check array lengths valid here?
         unsafe {
-            (self.library.borrow_dependent().vec_eval_double)(
+            (self.library.dependent.vec_eval)(
                 args.as_ptr(),
-                self.buffer_double.as_mut_ptr(),
+                self.buffer.as_mut_ptr(),
                 out.as_mut_ptr(),
-                self.data_double,
-            )
-        }
-    }
-
-    /// Evaluate the compiled code with complex numbers.
-    #[inline(always)]
-    pub fn evaluate_complex(&mut self, args: &[Complex<f64>], out: &mut [Complex<f64>]) {
-        unsafe {
-            (self.library.borrow_dependent().eval_complex)(
-                args.as_ptr(),
-                self.buffer_complex.as_mut_ptr(),
-                out.as_mut_ptr(),
-            )
-        }
-    }
-
-    /// Evaluate the compiled code with complex numbers.
-    #[inline(always)]
-    pub fn vec_evaluate_complex(&mut self, args: &[Complex<f64>], out: &mut [Complex<f64>]) {
-        // APN TODO check array lengths valid here?
-        unsafe {
-            (self.library.borrow_dependent().vec_eval_complex)(
-                args.as_ptr(),
-                self.buffer_complex.as_mut_ptr(),
-                out.as_mut_ptr(),
-                self.data_complex,
+                self.data,
             )
         }
     }
@@ -4865,12 +4771,13 @@ impl Default for CompileOptions {
     }
 }
 
-impl ExportedCode {
+impl<T: 'static> ExportedCode<T> {
     /// Create a new exported code object from a source file and function name.
     pub fn new(source_filename: String, function_name: String) -> Self {
         ExportedCode {
             source_filename,
             function_name,
+            _phantom: std::marker::PhantomData,
         }
     }
 
@@ -4879,7 +4786,7 @@ impl ExportedCode {
         &self,
         out: &str,
         options: CompileOptions,
-    ) -> Result<CompiledCode, std::io::Error> {
+    ) -> Result<CompiledCode<T>, std::io::Error> {
         let mut builder = std::process::Command::new(&options.compiler);
         builder
             .arg("-shared")
@@ -4924,6 +4831,7 @@ impl ExportedCode {
         Ok(CompiledCode {
             library_filename: out.to_string(),
             function_name: self.function_name.clone(),
+            _phantom: std::marker::PhantomData,
         })
     }
 }

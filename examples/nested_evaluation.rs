@@ -1,7 +1,7 @@
 use symbolica::{
     atom::{Atom, AtomCore},
     domains::{float::Complex, rational::Rational},
-    evaluate::{CompileOptions, FunctionMap, InlineASM, OptimizationSettings},
+    evaluate::{CompileOptions, FormatCPP, FunctionMap, InlineASM, NumberClass, OptimizationSettings},
     parse, symbol,
 };
 
@@ -59,11 +59,11 @@ fn main() {
     println!("{}", r);
 
     let mut compiled = e_f64
-        .export_cpp("nested_evaluate.cpp", "nested", true, InlineASM::X64)
+        .export_cpp("nested_evaluate.cpp", "nested", true, FormatCPP::ASM, InlineASM::X64, NumberClass::ComplexF64)
         .unwrap()
         .compile("nested", CompileOptions::default())
         .unwrap()
-        .load()
+        .load(symbolica::evaluate::LoadSettings { number_of_evaluations: 1, block_size: 1 })
         .unwrap();
 
     let mut out = vec![0.];
