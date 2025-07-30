@@ -186,7 +186,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonPrintMode>()?;
     m.add_class::<PythonReplacement>()?;
     m.add_class::<PythonExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledExpressionEvaluator<_>>()?;
+    m.add_class::<PythonCompiledExpressionEvaluator>()?;
     m.add_class::<PythonRandomNumberGenerator>()?;
     m.add_class::<PythonPatternRestriction>()?;
     m.add_class::<PythonTermStreamer>()?;
@@ -5616,7 +5616,7 @@ impl PythonExpression {
 
         Ok(PythonExpressionEvaluator {
             eval_rat: eval,
-            eval: eval_f64,
+            eval_f64,
             eval_complexf64,
         })
     }
@@ -11474,7 +11474,7 @@ impl ConvertibleToRationalPolynomial {
 pub struct PythonExpressionEvaluator {
     pub eval_rat: ExpressionEvaluator<Complex<Rational>>,
     pub eval_f64: Option<ExpressionEvaluator<f64>>,
-    pub eval_complex: Option<ExpressionEvaluator<Complex<f64>>>,
+    pub eval_complexf64: Option<ExpressionEvaluator<Complex<f64>>>,
 }
 
 #[pymethods]
@@ -11601,7 +11601,7 @@ impl PythonExpressionEvaluator {
     /// Evaluate the expression for multiple inputs that are flattened and return the flattened result.
     /// This method has less overhead than `evaluate`.
     fn evaluate_flat(&mut self, inputs: Vec<f64>) -> PyResult<Vec<f64>> {
-        let eval = self.eval.as_mut().ok_or(exceptions::PyValueError::new_err(
+        let eval = self.eval_f64.as_mut().ok_or(exceptions::PyValueError::new_err(
             "Evaluator contains complex coefficients. Use evaluate_complex_flat instead.",
         ))?;
 
@@ -11623,24 +11623,30 @@ impl PythonExpressionEvaluator {
         &mut self,
         py: Python<'py>,
         inputs: Vec<Complex<f64>>,
-    ) -> Vec<Bound<'py, PyComplex>> {
-        let n_inputs = inputs.len() / self.eval_complex.get_input_len();
-        let mut res = vec![Complex::new(0., 0.); self.eval_complex.get_output_len() * n_inputs];
-        for (r, s) in res
-            .chunks_mut(self.eval_complex.get_output_len())
-            .zip(inputs.chunks(self.eval_complex.get_output_len()))
-        {
-            self.eval_complex.evaluate(s, r);
-        }
+    ) -> PyResult<Vec<Bound<'py, PyComplex>>> {
+        if let Some(eval) = self.eval_complexf64 {
+            let n_inputs = inputs.len() / eval.get_input_len();
+            let mut res = vec![Complex::new(0., 0.); eval.get_output_len() * n_inputs];
+            for (r, s) in res
+                .chunks_mut(eval.get_output_len())
+                .zip(inputs.chunks(eval.get_output_len())) {
+                eval.evaluate(s, r);
+            }
 
-        res.into_iter()
-            .map(|x| PyComplex::from_doubles(py, x.re, x.im))
-            .collect()
+            Ok(res.into_iter()
+                .map(|x| PyComplex::from_doubles(py, x.re, x.im))
+                .collect())
+        }
+        else {
+            Err(exceptions::PyValueError::new_err(
+                "No complex evaluator available.",
+            ))
+        }
     }
 
     /// Evaluate the expression for multiple inputs and return the results.
     fn evaluate(&mut self, inputs: Vec<Vec<f64>>) -> PyResult<Vec<Vec<f64>>> {
-        let eval = self.eval.as_mut().ok_or(exceptions::PyValueError::new_err(
+        let eval = self.eval_f64.as_mut().ok_or(exceptions::PyValueError::new_err(
             "Evaluator contains complex coefficients. Use evaluate_complex instead.",
         ))?;
 
@@ -11659,17 +11665,24 @@ impl PythonExpressionEvaluator {
         &mut self,
         python: Python<'py>,
         inputs: Vec<Vec<Complex<f64>>>,
-    ) -> Vec<Vec<Bound<'py, PyComplex>>> {
-        let mut v = vec![Complex::new_zero(); self.eval_complex.get_output_len()];
-        inputs
-            .iter()
-            .map(|s| {
-                self.eval_complex.evaluate(s, &mut v);
-                v.iter()
-                    .map(|x| PyComplex::from_doubles(python, x.re, x.im))
-                    .collect()
-            })
-            .collect()
+    ) -> PyResult<Vec<Vec<Bound<'py, PyComplex>>>> {
+        if let Some(eval) = self.eval_complexf64 {
+           let mut v = vec![Complex::new_zero(); eval.get_output_len()];
+           Ok(inputs
+               .iter()
+               .map(|s| {
+                   eval.evaluate(s, &mut v);
+                   v.iter()
+                       .map(|x| PyComplex::from_doubles(python, x.re, x.im))
+                       .collect()
+               })
+               .collect())
+        }
+        else {
+            Err(exceptions::PyValueError::new_err(
+                "No complex evaluator available.",
+            ))
+        }
     }
 
     /// Compile the evaluator to a shared library using C++ and optionally inline assembly and load it.
@@ -11771,11 +11784,11 @@ impl PythonExpressionEvaluator {
                 }
             }
             NumberClass::ComplexF64 => {
-                if let Some(ref eval_complex) = self.eval_complex {
+                if let Some(ref eval_complex) = self.eval_complexf64 {
                     Ok(PythonCompiledExpressionEvaluator {
                         eval_f64: None,
                         eval_complex: Some(eval_complex
-                            .export_cpp(filename, function_name, true, formatcpp, inline_asm, number_class)
+                            .export_cpp::<Complex<f64>>(filename, function_name, true, formatcpp, inline_asm, number_class)
                             .map_err(|e| exceptions::PyValueError::new_err(format!("Export error: {}", e)))?
                             .compile(library_name, options)
                             .map_err(|e| {
