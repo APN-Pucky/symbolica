@@ -13,8 +13,6 @@ use std::{
 use ahash::{AHasher, HashMap};
 use rand::Rng;
 
-use self_cell::self_cell;
-
 use crate::{
     LicenseManager,
     atom::{Atom, AtomCore, AtomView, KeyLookup, Symbol},
@@ -4735,7 +4733,7 @@ impl<T: Default + Clone> CompiledEvaluator<T> {
     }
     /// Evaluate the compiled code.
     #[inline(always)]
-    fn vec_evaluate(&mut self, args: &[T], out: &mut [T], n : usize) {
+    pub fn vec_evaluate(&mut self, args: &[T], out: &mut [T], n : usize) {
         // APN TODO check array lengths valid here?
         unsafe {
             (self.library.dependent.vec_eval)(

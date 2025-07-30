@@ -5610,14 +5610,14 @@ impl PythonExpression {
         } else {
             None
         };
-        let eval_complex = eval
+        let eval_complexf64 = Some(eval
             .clone()
-            .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
+            .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64())));
 
         Ok(PythonExpressionEvaluator {
             eval_rat: eval,
             eval: eval_f64,
-            eval_complex,
+            eval_complexf64,
         })
     }
 
@@ -5713,7 +5713,7 @@ impl PythonExpression {
 
         Ok(PythonExpressionEvaluator {
             eval_rat: eval,
-            eval: eval_f64,
+            eval_f64,
             eval_complexf64,
         })
     }
@@ -11959,7 +11959,7 @@ impl PythonCompiledExpressionEvaluator {
             let mut res : Vec<Complex<f64>> = vec![Complex::<f64>::default(); self.output_len * n];
             let flat_input: Vec<Complex<f64>> = inputs.iter().flat_map(|row| row.iter().cloned()).collect();
             eval.vec_evaluate(&flat_input, &mut res, n);
-            return res.chunks(n).map(|chunk| chunk.into_iter().map(|x| PyComplex::from_doubles(python, x.re, x.im)).collect()).collect();
+            Ok(res.chunks(n).map(|chunk| chunk.into_iter().map(|x| PyComplex::from_doubles(python, x.re, x.im)).collect()).collect());
         }
         else {
             // Error no complex compiled evaluator loaded
